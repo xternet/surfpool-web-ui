@@ -17,10 +17,12 @@ class SolanaWebSocketService extends EventEmitter {
   private wsUrl: string | null = null;
   private subscriptions = new Map<string, WebSocketSubscription>();
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
+  private maxReconnectDelay = 5000;
   private reconnectDelay = 1000;
   private isConnecting = false;
   private connectionTimeout: NodeJS.Timeout | null = null;
+  private reconnectTimeout: NodeJS.Timeout | null = null;
+  private manuallyDisconnected = false;
 
   constructor() {
     super();
@@ -53,6 +55,11 @@ class SolanaWebSocketService extends EventEmitter {
   }
 
   connect(wsUrl: string): Promise<void> {
+    this.manuallyDisconnected = false;
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
     return new Promise((resolve, reject) => {
       // If already connected, resolve immediately
       if (this.ws?.readyState === WebSocket.OPEN) {
@@ -143,8 +150,12 @@ class SolanaWebSocketService extends EventEmitter {
 
         this.ws.onerror = (error) => {
           this.isConnecting = false;
-          console.error('❌ WebSocket error:', error);
-          this.emit('error', error);
+          logger.log('❌ WebSocket error:', error);
+          // An 'error' event without a listener throws ("Unhandled error"); onclose follows
+          // and reconnects either way.
+          if (this.listenerCount('error') > 0) {
+            this.emit('error', error);
+          }
           reject(error);
         };
 
@@ -157,13 +168,15 @@ class SolanaWebSocketService extends EventEmitter {
           logger.log('🔌 WebSocket closed:', event.code, event.reason);
           this.emit('disconnected', event);
           
-          // Attempt reconnection if not manually closed
-          if (event.code !== 1000 && this.reconnectAttempts < this.maxReconnectAttempts) {
+          // Keep reconnecting unless closed manually: a restarted surfnet returns at the same
+          // URL, sometimes after longer than a few short attempts.
+          if (!this.manuallyDisconnected) {
             this.reconnectAttempts++;
-            logger.log(`🔄 Attempting reconnection ${this.reconnectAttempts}/${this.maxReconnectAttempts}`);
-            setTimeout(() => {
-              this.connect(wsUrl).catch(console.error);
-            }, this.reconnectDelay * this.reconnectAttempts);
+            logger.log(`🔄 Attempting reconnection ${this.reconnectAttempts}`);
+            this.reconnectTimeout = setTimeout(() => {
+              this.reconnectTimeout = null;
+              this.connect(wsUrl).catch((error) => logger.log('🔄 Reconnection failed:', error));
+            }, Math.min(this.reconnectDelay * this.reconnectAttempts, this.maxReconnectDelay));
           }
         };
 
@@ -301,7 +314,8 @@ class SolanaWebSocketService extends EventEmitter {
     });
   }
 
-  private unsubscribe(subscriptionId: string, type: 'slot' | 'transaction') {
+  unsubscribe(subscriptionId: string, type: 'slot' | 'transaction') {
+    this.subscriptions.delete(subscriptionId);
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return;
     }
@@ -328,6 +342,11 @@ class SolanaWebSocketService extends EventEmitter {
   }
 
   disconnect() {
+    this.manuallyDisconnected = true;
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
     if (this.ws) {
       this.ws.close(1000, 'Manual disconnect');
       this.ws = null;
@@ -390,4 +409,4 @@ class SolanaWebSocketService extends EventEmitter {
 export const solanaWebSocketService = new SolanaWebSocketService();
 
 // Export the class for static method access
-export { SolanaWebSocketService }; 
+export { SolanaWebSocketService };
