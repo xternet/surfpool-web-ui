@@ -96,8 +96,9 @@ class SolanaWebSocketService extends EventEmitter {
       // If WebSocket exists but is in a bad state, clean it up
       if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
         logger.log('🧹 Cleaning up existing WebSocket connection');
-        this.ws.close();
+        const previous = this.ws;
         this.ws = null;
+        previous.close();
       }
 
       logger.log('🔗 Attempting to connect to:', wsUrl);
@@ -119,15 +120,18 @@ class SolanaWebSocketService extends EventEmitter {
 
       try {
         logger.log('🔗 Creating WebSocket connection...');
-        this.ws = new WebSocket(wsUrl);
+        const socket = new WebSocket(wsUrl);
+        this.ws = socket;
         
         this.connectionTimeout = setTimeout(() => {
+          if (this.ws !== socket) return;
           this.isConnecting = false;
           console.error('⏰ Connection timeout after 10 seconds');
           reject(new Error('Connection timeout after 10 seconds'));
         }, 10000);
 
         this.ws.onopen = () => {
+          if (this.ws !== socket) return;
           this.isConnecting = false;
           this.reconnectAttempts = 0;
           if (this.connectionTimeout) {
@@ -140,6 +144,7 @@ class SolanaWebSocketService extends EventEmitter {
         };
 
         this.ws.onmessage = (event) => {
+          if (this.ws !== socket) return;
           try {
             const data = JSON.parse(event.data);
             this.handleMessage(data);
@@ -149,6 +154,7 @@ class SolanaWebSocketService extends EventEmitter {
         };
 
         this.ws.onerror = (error) => {
+          if (this.ws !== socket) return;
           this.isConnecting = false;
           logger.log('❌ WebSocket error:', error);
           // An 'error' event without a listener throws ("Unhandled error"); onclose follows
@@ -160,6 +166,7 @@ class SolanaWebSocketService extends EventEmitter {
         };
 
         this.ws.onclose = (event) => {
+          if (this.ws !== socket) return;
           this.isConnecting = false;
           if (this.connectionTimeout) {
             clearTimeout(this.connectionTimeout);

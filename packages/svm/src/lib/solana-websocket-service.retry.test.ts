@@ -46,6 +46,61 @@ async function droppedService() {
 }
 
 describe('SolanaWebSocketService', () => {
+  it('ignores an asynchronously closing socket after a replacement starts', async () => {
+    const service = new SolanaWebSocketService();
+    const first = service.connect('ws://first.invalid');
+    const old = FakeSocket.instances[0];
+    old.open();
+    await first;
+    old.close = () => {
+      old.readyState = FakeSocket.CLOSING;
+      setTimeout(() => {
+        old.readyState = FakeSocket.CLOSED;
+        old.onclose?.({ code: 1000, reason: 'Manual disconnect' });
+      }, 0);
+    };
+    service.disconnect();
+    const connected = service.connect('ws://replacement.invalid');
+    const replacement = FakeSocket.instances[1];
+    const disconnected = vi.fn();
+    service.on('disconnected', disconnected);
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(service.isConnectionInProgress()).toBe(true);
+      expect(disconnected).not.toHaveBeenCalled();
+    } finally {
+      replacement.open();
+      await connected;
+      service.disconnect();
+    }
+  });
+
+  it('ignores messages and open/error events from an obsolete socket', async () => {
+    const service = new SolanaWebSocketService();
+    const first = service.connect('ws://first.invalid');
+    const old = FakeSocket.instances[0];
+    old.open();
+    await first;
+    service.disconnect();
+    const connected = service.connect('ws://replacement.invalid');
+    const replacement = FakeSocket.instances[1];
+    const opened = vi.fn(), errors = vi.fn(), slots = vi.fn();
+    service.on('connected', opened).on('error', errors).on('slot', slots);
+    try {
+      old.onopen?.();
+      old.onerror?.(new Error('obsolete socket'));
+      old.onmessage?.({ data: JSON.stringify({ method: 'slotNotification', params: { result: { slot: 1 } } }) });
+      expect(service.isConnectionInProgress()).toBe(true);
+      expect(opened).not.toHaveBeenCalled();
+      expect(errors).not.toHaveBeenCalled();
+      expect(slots).not.toHaveBeenCalled();
+    } finally {
+      replacement.open();
+      await connected;
+      service.disconnect();
+    }
+  });
+
   it('reconnects after the server closes normally during a restart', async () => {
     const service = new SolanaWebSocketService();
     const connected = service.connect('ws://fork.invalid');
